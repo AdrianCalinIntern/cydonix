@@ -1,12 +1,13 @@
+
 __author__ = 'alex'
 import logging
 
+from django.core.exceptions import ObjectDoesNotExist
 from sleekxmpp import ClientXMPP
 from sleekxmpp.xmlstream import ET, tostring
 
 from datetime import datetime
-
-import sqlite3
+from portal.models import Sensors, SensorData
 import re
 
 import threading
@@ -52,7 +53,7 @@ class PortalXMPP(ClientXMPP):
         self.add_event_handler('pubsub_publish', self._publish)
 
         try:
-            #self.subscribe()
+            self.subscribe()
             #self.unsubscribe()
 
             # Starting to process incoming messages
@@ -61,33 +62,22 @@ class PortalXMPP(ClientXMPP):
             self.send_thread.cancel()
 
     def send_m(self):
-        self.connection = sqlite3.connect(self.DB_path)
-        self.cursor = self.connection.cursor()
-
-        self.cursor.execute("SELECT sensor_type FROM portal_sensors")
-        sensor_types = self.cursor.fetchall()
-
+        sensors = Sensors.objects.all()
         s = ''
 
-        for s_type in sensor_types:
-            str_s_type = str(s_type[0])
-            s += str_s_type+' '
+        for s_type in sensors:
+            s += s_type.sensor_type + ' '
 
         s = s.strip()
-
         # Sending custom 'get' requests for sensor data
         self.send_message(mto=self.sensor_bot_jid,
                           mbody='GET '+s, mtype='normal', mfrom=self.sender_jid)
 
-        print("Sent 'GET "+s+"'")
+        print("Sent 'GET " + s + "'")
         self.process(block=False)
 
     def receive_m(self, msg):
-        self.connection = sqlite3.connect(self.DB_path)
-        self.cursor = self.connection.cursor()
-
         #print("Received '"+str(msg['body'])+"'")
-        print("Received '"+str(msg)+"'")
 
         # Parsing the received message, with regular expressions
         s_sensor_type_names = re.split(' ', str(msg['body']))
@@ -112,16 +102,17 @@ class PortalXMPP(ClientXMPP):
             for item in self.sensor_types_dict:
                 if item == s_sensor_type_name:
                     found_in_cache = 1
-                    sensor_type = self.sensor_types_dict[item]
+                    sensor = self.sensor_types_dict[item]
                     commit = 1
 
             # Fetching the id of the sensor_type with the name = s_sensor_type_name if it exists in the database
             if found_in_cache == 0:
-                self.cursor.execute("SELECT id FROM portal_sensors WHERE sensor_type='"+s_sensor_type_name+"'")
-                sensor_type = self.cursor.fetchone()
-                if str(sensor_type) != 'None':
-                    sensor_type = sensor_type[0]
-                    self.sensor_types_dict[s_sensor_type_name] = sensor_type  # Add found id to cache
+                try:
+                    s = Sensors.objects.get(sensor_type=s_sensor_type_name)
+                except ObjectDoesNotExist:
+                    s = None
+                if s:
+                    self.sensor_types_dict[s_sensor_type_name] = s  # Add found id to cache
                     commit = 1
                 else:
                     print("There is no sensor of type '"+s_sensor_type_name+"'")
@@ -130,17 +121,11 @@ class PortalXMPP(ClientXMPP):
             if commit > 0:
                 utc_time = datetime.utcnow().isoformat(' ')  # UTC date and time in ISO 8601 format
 
-                s_sensor_type = str(sensor_type)
                 s_value = str(value)
                 s_time = "'"+str(utc_time)+"'"
 
-                print("INSERT INTO portal_sensordata (sensor_id, value, timestamp)"
-                      "VALUES ( " + s_sensor_type + ", " + s_value + ", " + s_time+")")
-
-                # Adding the received sensor data to the appropriate table
-                self.cursor.execute("INSERT INTO portal_sensordata (sensor_id, value, timestamp)"
-                                    "VALUES ( " + s_sensor_type + ", " + s_value + ", " + s_time+")")
-                self.connection.commit()
+                sd = SensorData(sensor=sensor, value=s_value, timestamp=s_time)
+                sd.save()
 
                 print("Commited")
             else:
@@ -150,13 +135,9 @@ class PortalXMPP(ClientXMPP):
         print("Started")
 
     def sensor_types_cache_init(self):
-        self.connection = sqlite3.connect(self.DB_path)
-        self.cursor = self.connection.cursor()
-
-        self.cursor.execute("SELECT * FROM portal_sensors")
-        sensor_types = self.cursor.fetchall()
-        for item in sensor_types:
-            self.sensor_types_dict[str(item[1])] = item[0]
+        s = Sensors.objects.all()
+        for item in s:
+            self.sensor_types_dict[str(item.sensor_type)] = item
 
     def subscribe(self):
         try:
